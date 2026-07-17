@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "living-land",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8407"],
+      "port": 8407
+    }
+  ]
+}
