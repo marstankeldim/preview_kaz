@@ -1,9 +1,9 @@
-/* The Living Land — WebGL living photographs.
+/* The Living Land — living photographs.
  *
- * Each piece is a single JPEG animated in a fragment shader. All motion is
- * built from functions periodic in uPhase (0..1 over LOOP_MS), so every
- * portrait is a perfect loop. Fractions in PIECES are measured from the TOP
- * of the image. Append ?debug to the URL to see the mask lines.
+ * Each piece composites real timelapse footage (Adobe Stock, licensed) behind
+ * a Photoshop-API sky matte, over a still photograph. Water breathes via a
+ * lake matte and shader displacement; birds are chroma-keyed real footage.
+ * Fractions are measured from the TOP of the image. ?debug draws the guides.
  */
 
 const LOOP_MS = 16000;
@@ -12,30 +12,37 @@ const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const PIECES = {
   charyn: {
-    sky: 0.30, skyGate: 1, cloud: 0.85,
-    birds: { y: [0.05, 0.22], tint: "rgba(18,20,24,0.55)" },
+    skyVideo: "video/charyn-sky.mp4", skyBand: 0.40,
+    skyMask: "masks/charyn-sky.png",
+    grade: { desat: 0.55, gamma: [0.82, 0.82, 0.82], gain: [1.02, 1.0, 0.98], lift: [0.10, 0.10, 0.10] },
   },
   kaindy: {
-    waterTop: 0.56, water: 1.0,
+    waterMask: "masks/kaindy-water.png", water: 1.0,
     mist: 0.30, mistY: 0.30,
   },
   bozzhyra: {
-    sky: 0.60, skyGate: 1, cloud: 0.55,
-    birds: { y: [0.04, 0.28], tint: "rgba(32,25,20,0.55)" },
+    skyVideo: "video/bozzhyra-sky.mp4", skyBand: 0.68,
+    skyMask: "masks/bozzhyra-sky.png",
+    grade: { desat: 0.05, gamma: [0.98, 1.0, 1.05], gain: [1.10, 1.0, 0.88], lift: [0, 0, 0] },
   },
   kolsai: {
-    sky: 0.30, skyGate: 1, cloud: 0.80,
-    waterTop: 0.56, waterBot: 0.80, water: 0.70,
-    mist: 0.25, mistY: 0.40,
+    skyVideo: "video/kolsai-sky.mp4", skyBand: 0.46,
+    skyMask: "masks/kolsai-sky.png",
+    grade: { desat: 0.10, gamma: [1.02, 1.0, 0.98], gain: [0.95, 0.97, 1.0], lift: [0, 0, 0] },
+    waterMask: "masks/kolsai-water.png", water: 0.75,
+    mist: 0.22, mistY: 0.40,
   },
   tuzbair: {
-    sweep: 0.8,
-    birds: { y: [0.08, 0.34], x: [0.45, 1.0], tint: "rgba(25,24,26,0.5)" },
+    skyVideo: "video/tuzbair-sky.mp4", skyBand: 0.60,
+    skyMask: "masks/tuzbair-sky.png",
+    grade: { desat: 0.20, gamma: [1.05, 1.0, 0.95], gain: [0.88, 0.93, 1.04], lift: [0, 0, 0] },
+    sweep: 0.5,
   },
   bao: {
-    sky: 0.36, stars: 1.0,
-    waterTop: 0.88, water: 0.35,
-    shooting: true,
+    skyVideo: "video/bao-sky.mp4", skyBand: 0.58,
+    skyMask: "masks/bao-sky.png",
+    grade: { desat: 0.0, gamma: [0.90, 0.87, 0.82], gain: [0.85, 0.98, 1.15], lift: [0.0, 0.01, 0.03] },
+    waterMask: "masks/bao-water.png", water: 0.35, waterYMin: 0.82,
   },
 };
 
@@ -54,19 +61,14 @@ void main() {
 const FRAG = `
 precision highp float;
 varying vec2 vUv;
-uniform sampler2D uTex;
-uniform float uPhase;     /* 0..1, loops */
-uniform float uAspect;
-uniform float uSky;       /* skyline, fraction from top */
-uniform float uSkyGate;   /* 1 = only displace sky-coloured pixels */
-uniform float uCloud;
-uniform float uWaterTop;  /* water band, fractions from top */
-uniform float uWaterBot;
-uniform float uWater;
-uniform float uMist;
-uniform float uMistY;
-uniform float uStars;
-uniform float uSweep;
+uniform sampler2D uTex, uSkyMask, uWaterMask, uSkyVid, uBirdVid;
+uniform float uHasSkyVid, uHasWater, uHasBird;
+uniform float uSkyBand, uWaterYMin, uWaterAmp;
+uniform vec3 uGain, uLift, uGamma;
+uniform float uDesat, uMist, uMistY, uSweep, uPhase, uAspect, uBirdOpacity;
+uniform vec4 uBirdRect;   /* x0, yT0, x1, yT1 */
+uniform vec2 uTexel;
+uniform vec2 uMaskCurve;  /* smoothstep lo/hi for the sky matte edge */
 
 #define TAU 6.283185307179586
 
@@ -89,52 +91,62 @@ float fbm(vec2 p) {
   return v;
 }
 
+/* soft 4-tap mask fetch; radius grows toward the horizon for a wider blend */
+float maskSoft(sampler2D m, vec2 uv, float r) {
+  vec2 o = uTexel * r;
+  return (texture2D(m, uv + o).r + texture2D(m, uv - o).r
+        + texture2D(m, uv + vec2(o.x, -o.y)).r + texture2D(m, uv + vec2(-o.x, o.y)).r) * 0.25;
+}
+
 void main() {
   vec2 uv = vUv;
-  float yT = 1.0 - uv.y;               /* fraction from top of image */
+  float yT = 1.0 - uv.y;
   vec3 base = texture2D(uTex, uv).rgb;
   vec3 col = base;
   float lum = dot(base, vec3(0.299, 0.587, 0.114));
-
-  /* circular walk through the noise field -> seamless loop */
   vec2 loopVec = vec2(cos(uPhase * TAU), sin(uPhase * TAU));
 
-  /* ---- drifting clouds (dual-phase flow, fades out above skyline) ---- */
-  if (uCloud > 0.001) {
-    float band = 1.0 - smoothstep(uSky * 0.55, uSky * 0.97, yT);
-    float gate = 1.0;
-    if (uSkyGate > 0.5) {
-      gate = smoothstep(0.02, 0.14, (base.b - base.r) * 1.4 + max(0.0, lum - 0.62) * 0.55);
-    }
-    float m = band * gate;
-    if (m > 0.001) {
-      float t1 = fract(uPhase * 2.0);
-      float t2 = fract(uPhase * 2.0 + 0.5);
-      float w  = abs(t1 * 2.0 - 1.0);
-      float amp = 0.009 * uCloud * m;
-      vec2 wind = vec2(1.0, 0.10 * sin(yT * 9.0));
-      float billow = (noise(vec2(uv.x * 6.0 * uAspect, yT * 4.0) + loopVec * 0.35) - 0.5)
-                     * 0.003 * uCloud * m;
-      vec3 c1 = texture2D(uTex, uv + wind * (t1 - 0.5) * amp + vec2(0.0, billow)).rgb;
-      vec3 c2 = texture2D(uTex, uv + wind * (t2 - 0.5) * amp + vec2(0.0, billow)).rgb;
-      col = mix(col, mix(c1, c2, w), m);
+  /* ---- real-footage sky behind the matte ---- */
+  if (uHasSkyVid > 0.5) {
+    float feather = mix(1.4, 4.5, clamp(yT / max(uSkyBand, 0.001), 0.0, 1.0));
+    float m = smoothstep(uMaskCurve.x, uMaskCurve.y, maskSoft(uSkyMask, uv, feather));
+    if (m > 0.003) {
+      vec2 vuv = vec2(uv.x, 1.0 - clamp(yT / uSkyBand, 0.0, 1.0));
+      vec3 v = texture2D(uSkyVid, vuv).rgb;
+      float vl = dot(v, vec3(0.299, 0.587, 0.114));
+      v = mix(v, vec3(vl), uDesat);
+      v = pow(max(v, vec3(0.0)), uGamma) * uGain + uLift;
+      col = mix(col, v, m);
     }
   }
 
-  /* ---- breathing water (vertical ripple, sparkle) ---- */
-  if (uWater > 0.001) {
-    float wband = smoothstep(uWaterTop, uWaterTop + 0.05, yT)
-                * (1.0 - smoothstep(uWaterBot - 0.04, uWaterBot, yT));
-    if (wband > 0.001) {
-      float depth = clamp((yT - uWaterTop) / max(0.001, uWaterBot - uWaterTop), 0.0, 1.0);
+  /* ---- chroma-keyed birds, clipped to the sky matte ---- */
+  if (uHasBird > 0.5) {
+    if (uv.x > uBirdRect.x && uv.x < uBirdRect.z && yT > uBirdRect.y && yT < uBirdRect.w) {
+      vec2 buv = vec2((uv.x - uBirdRect.x) / (uBirdRect.z - uBirdRect.x),
+                      1.0 - (yT - uBirdRect.y) / (uBirdRect.w - uBirdRect.y));
+      vec3 bv = texture2D(uBirdVid, buv).rgb;
+      float greenness = bv.g - max(bv.r, bv.b);
+      float a = 1.0 - smoothstep(0.05, 0.18, greenness);
+      float skym = uHasSkyVid > 0.5 ? smoothstep(uMaskCurve.x, uMaskCurve.y, maskSoft(uSkyMask, uv, 1.4)) : 1.0;
+      float bl = dot(bv, vec3(0.299, 0.587, 0.114));
+      col = mix(col, vec3(bl * 0.85), a * skym * uBirdOpacity);
+    }
+  }
+
+  /* ---- water breathing inside the lake matte ---- */
+  if (uHasWater > 0.5) {
+    float wm = maskSoft(uWaterMask, uv, 1.6);
+    wm *= smoothstep(uWaterYMin, uWaterYMin + 0.03, yT);
+    if (wm > 0.003) {
       float p1 = sin(uv.x * 90.0 + uPhase * TAU * 3.0 + yT * 70.0);
       float p2 = sin(uv.x * 52.0 - uPhase * TAU * 2.0 + yT * 118.0);
       float p3 = noise(vec2(uv.x * 22.0 * uAspect, yT * 30.0) + loopVec * 0.8) - 0.5;
-      vec2 woff = vec2((p2 - p1) * 0.45, (p1 + p2) * 0.85 + p3)
-                  * 0.0022 * uWater * wband * (0.35 + 0.65 * depth);
-      col = mix(col, texture2D(uTex, uv + woff).rgb, wband);
+      vec2 woff = vec2((p2 - p1) * 0.45, (p1 + p2) * 0.85 + p3) * 0.0022 * uWaterAmp * wm;
+      float wm2 = maskSoft(uWaterMask, uv + woff, 1.6);
+      col = mix(col, texture2D(uTex, uv + woff).rgb, wm * wm2);
       float spark = noise(uv * vec2(160.0 * uAspect, 220.0) + loopVec * 2.0) - 0.5;
-      col += spark * 0.05 * uWater * wband * smoothstep(0.25, 0.75, lum);
+      col += spark * 0.05 * uWaterAmp * wm * smoothstep(0.25, 0.75, lum);
     }
   }
 
@@ -143,15 +155,6 @@ void main() {
     float bandM = exp(-pow((yT - uMistY) / 0.09, 2.0));
     float m = fbm(uv * vec2(3.5 * uAspect, 2.2) + loopVec * 0.5);
     col += vec3(0.82, 0.88, 0.95) * smoothstep(0.38, 0.85, m) * bandM * uMist * 0.16;
-  }
-
-  /* ---- twinkling stars (bright pixels above the ridge) ---- */
-  if (uStars > 0.001) {
-    float band = 1.0 - smoothstep(uSky * 0.82, uSky, yT);
-    float gate = smoothstep(0.45, 0.80, lum);
-    float h = hash(floor(vUv * 900.0));
-    float tw = sin(TAU * (uPhase * 5.0 + h * 7.0));
-    col *= 1.0 + uStars * band * gate * 0.38 * tw;
   }
 
   /* ---- travelling sunlight ---- */
@@ -168,110 +171,10 @@ void main() {
 }`;
 
 /* ------------------------------------------------------------------ */
-/* overlay fauna: birds + shooting stars                               */
+/* a living photograph                                                 */
 /* ------------------------------------------------------------------ */
 
 const rand = (a, b) => a + Math.random() * (b - a);
-
-class Bird {
-  constructor(w, h, cfg) {
-    const [y0, y1] = cfg.y;
-    const [x0, x1] = cfg.x || [0, 1];
-    this.dir = Math.random() < 0.5 ? 1 : -1;
-    this.x = (this.dir > 0 ? x0 : x1) * w;
-    this.spanPx = (x1 - x0) * w;
-    this.y0 = rand(y0, y1) * h;
-    this.speed = w / rand(17, 24);            /* px per second */
-    this.size = w * rand(0.0065, 0.009);
-    this.wobA = h * rand(0.006, 0.014);
-    this.wobF = rand(0.4, 0.7);
-    this.flapPhase = rand(0, Math.PI * 2);
-    this.flapSpeed = rand(2.4, 3.1) * Math.PI * 2;
-    this.glidePhase = rand(0, Math.PI * 2);
-    this.t = 0;
-    this.done = false;
-  }
-  update(dt) {
-    this.t += dt;
-    this.x += this.dir * this.speed * dt;
-    /* alternate flapping and gliding; glide holds a shallow-V posture */
-    const gliding = Math.sin(this.t * 0.55 + this.glidePhase) < -0.35;
-    if (gliding) {
-      const TAU = Math.PI * 2;
-      const d = ((Math.PI / 3 - this.flapPhase % TAU) + Math.PI * 3) % TAU - Math.PI;
-      this.flapPhase += d * Math.min(1, dt * 4);
-    } else {
-      this.flapPhase += this.flapSpeed * dt;
-    }
-    const progress = (this.dir > 0 ? this.x : this.spanPx - this.x) / this.spanPx;
-    if (progress > 1.05) this.done = true;
-  }
-  draw(ctx, cfg, w) {
-    const [x0, x1] = cfg.x || [0, 1];
-    const u = (this.x / w - x0) / (x1 - x0);
-    if (u < -0.02 || u > 1.02) return;
-    const fade = Math.min(1, Math.min(u, 1 - u) / 0.09);
-    if (fade <= 0) return;
-    const y = this.y0 + this.wobA * Math.sin(this.t * this.wobF * Math.PI * 2);
-    const s = this.size;
-    const wingY = Math.sin(this.flapPhase) * s * 0.8;
-    ctx.save();
-    ctx.globalAlpha = Math.max(0, fade);
-    ctx.strokeStyle = cfg.tint || "rgba(18,20,24,0.55)";
-    ctx.lineWidth = Math.max(1, s * 0.22);
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(this.x - s, y - wingY * 0.15);
-    ctx.quadraticCurveTo(this.x - s * 0.45, y - wingY, this.x, y);
-    ctx.quadraticCurveTo(this.x + s * 0.45, y - wingY, this.x + s, y - wingY * 0.15);
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
-class ShootingStar {
-  constructor(w, h, skyFrac) {
-    this.x = rand(0.15, 0.85) * w;
-    this.y = rand(0.06, skyFrac * 0.55) * h;
-    const ang = rand(0.42, 0.75) * (Math.random() < 0.5 ? 1 : -1);
-    this.dx = Math.cos(ang) * (Math.random() < 0.5 ? 1 : -1);
-    this.dy = Math.abs(Math.sin(ang));
-    this.len = h * rand(0.07, 0.11);
-    this.life = rand(0.8, 1.2);
-    this.t = 0;
-    this.speed = this.len * 2.6 / this.life;
-    this.done = false;
-  }
-  update(dt) {
-    this.t += dt;
-    this.x += this.dx * this.speed * dt;
-    this.y += this.dy * this.speed * dt;
-    if (this.t >= this.life) this.done = true;
-  }
-  draw(ctx) {
-    const u = this.t / this.life;
-    const a = Math.sin(Math.PI * Math.min(1, u)) * 0.85;
-    if (a <= 0) return;
-    const tx = this.x - this.dx * this.len;
-    const ty = this.y - this.dy * this.len;
-    const g = ctx.createLinearGradient(this.x, this.y, tx, ty);
-    g.addColorStop(0, `rgba(235,240,255,${a})`);
-    g.addColorStop(1, "rgba(235,240,255,0)");
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    ctx.strokeStyle = g;
-    ctx.lineWidth = Math.max(1.6, ctx.canvas.width / 900);
-    ctx.beginPath();
-    ctx.moveTo(this.x, this.y);
-    ctx.lineTo(tx, ty);
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* a living photograph                                                 */
-/* ------------------------------------------------------------------ */
 
 class Piece {
   constructor(fig, cfg) {
@@ -281,11 +184,9 @@ class Piece {
     this.poster = fig.querySelector(".poster");
     this.visible = false;
     this.started = false;
+    this.ready = false;
     this.gl = null;
-    this.fauna = [];
-    this.nextBird = rand(2.5, 6);
-    this.nextStar = rand(4, 9);
-    this.clock = 0;
+    this.videos = [];
   }
 
   start() {
@@ -311,7 +212,42 @@ class Piece {
     if (img.complete) img.onload();
   }
 
+  makeVideo(src) {
+    const v = document.createElement("video");
+    v.muted = true;
+    v.loop = true;
+    v.playsInline = true;
+    v.crossOrigin = "anonymous";
+    v.preload = "auto";
+    v.src = src;
+    this.videos.push(v);
+    return v;
+  }
+
+  loadTexture(unit, source, done) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    if (source) {
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source);
+      if (done) done();
+    } else {
+      /* 1x1 placeholder until video frames arrive */
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE,
+                    new Uint8Array([0, 255, 0]));
+    }
+    return tex;
+  }
+
   initGL(img) {
+    const c = this.cfg;
     const glCanvas = document.createElement("canvas");
     glCanvas.className = "gl";
     const fxCanvas = document.createElement("canvas");
@@ -353,41 +289,102 @@ class Piece {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    const u = (n) => gl.getUniformLocation(prog, n);
-    const c = this.cfg;
-    gl.uniform1f(u("uAspect"), img.naturalWidth / img.naturalHeight);
-    gl.uniform1f(u("uSky"), c.sky ?? 0.3);
-    gl.uniform1f(u("uSkyGate"), c.skyGate ?? 0);
-    gl.uniform1f(u("uCloud"), c.cloud ?? 0);
-    gl.uniform1f(u("uWaterTop"), c.waterTop ?? 2.0);
-    gl.uniform1f(u("uWaterBot"), c.waterBot ?? 1.0);
-    gl.uniform1f(u("uWater"), c.water ?? 0);
-    gl.uniform1f(u("uMist"), c.mist ?? 0);
-    gl.uniform1f(u("uMistY"), c.mistY ?? c.sky ?? 0.3);
-    gl.uniform1f(u("uStars"), c.stars ?? 0);
-    gl.uniform1f(u("uSweep"), c.sweep ?? 0);
-    this.uPhase = u("uPhase");
-
     this.gl = gl;
     this.glCanvas = glCanvas;
     this.fxCanvas = fxCanvas;
     this.fx = fxCanvas.getContext("2d");
-    this.stack.append(glCanvas, fxCanvas);
 
+    const u = (n) => gl.getUniformLocation(prog, n);
+    /* photo */
+    this.loadTexture(0, img);
+    gl.uniform1i(u("uTex"), 0);
+    gl.uniform2f(u("uTexel"), 1 / img.naturalWidth, 1 / img.naturalHeight);
+    gl.uniform1f(u("uAspect"), img.naturalWidth / img.naturalHeight);
+
+    /* masks (async) */
+    const loadMask = (unit, src, uniform) => {
+      gl.uniform1i(u(uniform), unit);
+      this.loadTexture(unit, null);
+      const m = new Image();
+      m.onload = () => {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, m);
+        this.maskReady = true;
+      };
+      m.src = src;
+    };
+    if (c.skyMask) loadMask(1, c.skyMask, "uSkyMask");
+    if (c.waterMask) loadMask(2, c.waterMask, "uWaterMask");
+
+    /* videos */
+    gl.uniform1i(u("uSkyVid"), 3);
+    gl.uniform1i(u("uBirdVid"), 4);
+    if (c.skyVideo) {
+      this.skyVid = this.makeVideo(c.skyVideo);
+      this.skyTex = this.loadTexture(3, null);
+    } else {
+      this.loadTexture(3, null);
+    }
+    if (c.birdVideo) {
+      this.birdVid = this.makeVideo(c.birdVideo);
+      this.birdTex = this.loadTexture(4, null);
+    } else {
+      this.loadTexture(4, null);
+    }
+
+    const g = c.grade || {};
+    gl.uniform1f(u("uHasSkyVid"), c.skyVideo ? 1 : 0);
+    gl.uniform1f(u("uHasWater"), c.waterMask ? 1 : 0);
+    gl.uniform1f(u("uHasBird"), c.birdVideo ? 1 : 0);
+    gl.uniform1f(u("uSkyBand"), c.skyBand ?? 0.5);
+    gl.uniform1f(u("uWaterYMin"), c.waterYMin ?? 0);
+    gl.uniform1f(u("uWaterAmp"), c.water ?? 0);
+    gl.uniform3fv(u("uGain"), g.gain ?? [1, 1, 1]);
+    gl.uniform3fv(u("uLift"), g.lift ?? [0, 0, 0]);
+    gl.uniform3fv(u("uGamma"), g.gamma ?? [1, 1, 1]);
+    gl.uniform1f(u("uDesat"), g.desat ?? 0);
+    gl.uniform1f(u("uMist"), c.mist ?? 0);
+    gl.uniform1f(u("uMistY"), c.mistY ?? 0.3);
+    gl.uniform1f(u("uSweep"), c.sweep ?? 0);
+    gl.uniform1f(u("uBirdOpacity"), c.birdOpacity ?? 0);
+    const r = c.birdRect ?? [0, 0, 0, 0];
+    gl.uniform4f(u("uBirdRect"), r[0], r[1], r[2], r[3]);
+    /* dilated default pulls the video right up to each silhouette */
+    const mc = c.maskCurve ?? [0.14, 0.55];
+    gl.uniform2f(u("uMaskCurve"), mc[0], mc[1]);
+    this.uPhase = u("uPhase");
+    this.prog = prog;
+
+    this.stack.append(glCanvas, fxCanvas);
     this.resize();
     new ResizeObserver(() => this.resize()).observe(this.stack);
-    /* first frame before the fade-in so there is no flash */
+
+    if (this.visible) this.play();
     this.draw(performance.now());
+    if (!c.skyVideo) this.markReady();
+  }
+
+  markReady() {
+    if (this.ready) return;
+    this.ready = true;
     this.stack.classList.add("ready");
+  }
+
+  play() {
+    this.videos.forEach((v) => v.play().catch(() => {}));
+  }
+  pause() {
+    this.videos.forEach((v) => v.pause());
+  }
+
+  uploadVideoFrame(unit, video) {
+    if (!video || video.readyState < 2) return false;
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+    return true;
   }
 
   resize() {
@@ -402,68 +399,34 @@ class Piece {
     this.gl.viewport(0, 0, w, h);
   }
 
-  draw(now, dt = 0) {
+  draw(now) {
     const gl = this.gl;
     if (!gl) return;
+    if (this.skyVid && this.uploadVideoFrame(3, this.skyVid)) this.markReady();
+    if (this.birdVid) this.uploadVideoFrame(4, this.birdVid);
     gl.uniform1f(this.uPhase, (now % LOOP_MS) / LOOP_MS);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    this.drawFauna(dt);
+    if (DEBUG) this.drawDebug();
+    else this.fx.clearRect(0, 0, this.fxCanvas.width, this.fxCanvas.height);
   }
 
-  drawFauna(dt) {
-    const ctx = this.fx;
-    const w = this.fxCanvas.width, h = this.fxCanvas.height;
+  drawDebug() {
+    const ctx = this.fx, w = this.fxCanvas.width, h = this.fxCanvas.height;
     ctx.clearRect(0, 0, w, h);
-    this.clock += dt;
-
     const c = this.cfg;
-    if (c.birds && this.clock > this.nextBird) {
-      this.nextBird = this.clock + rand(9, 22);
-      this.fauna.push(new Bird(w, h, c.birds));
-      if (Math.random() < 0.4) {
-        const twin = new Bird(w, h, c.birds);
-        twin.dir = this.fauna.at(-1).dir;
-        twin.x = this.fauna.at(-1).x - twin.dir * w * 0.03;
-        twin.y0 = this.fauna.at(-1).y0 + h * rand(0.015, 0.03);
-        this.fauna.push(twin);
-      }
-    }
-    if (c.shooting && this.clock > this.nextStar) {
-      this.nextStar = this.clock + rand(12, 26);
-      this.fauna.push(new ShootingStar(w, h, c.sky ?? 0.4));
-    }
-
-    for (const f of this.fauna) {
-      f.update(dt);
-      if (f instanceof Bird) f.draw(ctx, c.birds, w);
-      else f.draw(ctx);
-    }
-    this.fauna = this.fauna.filter((f) => !f.done);
-
-    if (DEBUG) this.drawDebug(ctx, w, h);
-  }
-
-  drawDebug(ctx, w, h) {
-    const line = (frac, color, label, dash = []) => {
-      if (frac == null) return;
-      ctx.save();
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      ctx.lineWidth = 2;
-      ctx.setLineDash(dash);
-      ctx.beginPath();
-      ctx.moveTo(0, frac * h);
-      ctx.lineTo(w, frac * h);
-      ctx.stroke();
+    const line = (frac, color, label) => {
+      ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, frac * h); ctx.lineTo(w, frac * h); ctx.stroke();
       ctx.font = `${Math.round(h / 45)}px monospace`;
       ctx.fillText(`${label} ${frac}`, 12, frac * h - 8);
-      ctx.restore();
     };
-    const c = this.cfg;
-    if (c.cloud || c.stars) line(c.sky, "rgba(255,80,80,0.9)", "sky");
-    if (c.water) line(c.waterTop, "rgba(80,220,255,0.9)", "waterTop");
-    if (c.water && c.waterBot != null) line(c.waterBot, "rgba(80,220,255,0.9)", "waterBot", [10, 8]);
-    if (c.mist) line(c.mistY, "rgba(200,120,255,0.9)", "mistY", [4, 6]);
+    if (c.skyBand) line(c.skyBand, "rgba(255,120,80,0.9)", "skyBand");
+    if (c.waterYMin) line(c.waterYMin, "rgba(80,220,255,0.9)", "waterYMin");
+    if (c.birdRect) {
+      const [x0, y0, x1, y1] = c.birdRect;
+      ctx.strokeStyle = "rgba(255,230,90,0.9)";
+      ctx.strokeRect(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h);
+    }
   }
 }
 
@@ -478,7 +441,9 @@ for (const fig of document.querySelectorAll(".piece")) {
 }
 
 const reveal = new IntersectionObserver(
-  (entries) => entries.forEach((e) => e.target.classList.toggle("in", e.isIntersecting || e.target.classList.contains("in"))),
+  (entries) => entries.forEach((e) => {
+    if (e.isIntersecting) e.target.classList.add("in");
+  }),
   { threshold: 0.12 }
 );
 document.querySelectorAll(".piece").forEach((f) => reveal.observe(f));
@@ -489,19 +454,22 @@ if (!REDUCED) {
       entries.forEach((e) => {
         const p = pieces.find((p) => p.fig === e.target);
         if (!p) return;
+        const was = p.visible;
         p.visible = e.isIntersecting;
-        if (e.isIntersecting) p.start();
+        if (e.isIntersecting) {
+          p.start();
+          if (p.gl && !was) p.play();
+        } else if (was && p.gl) {
+          p.pause();
+        }
       }),
     { rootMargin: "220px" }
   );
   pieces.forEach((p) => watch.observe(p.fig));
 
-  let last = performance.now();
   const tick = (now) => {
-    const dt = Math.min(0.1, (now - last) / 1000);
-    last = now;
     if (!document.hidden) {
-      for (const p of pieces) if (p.visible) p.draw(now, dt);
+      for (const p of pieces) if (p.visible) p.draw(now);
     }
     requestAnimationFrame(tick);
   };
