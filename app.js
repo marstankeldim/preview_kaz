@@ -14,7 +14,8 @@ const PIECES = {
   charyn: {
     skyVideo: "video/charyn-sky.mp4", skyBand: 0.40,
     skyMask: "masks/charyn-sky.png",
-    grade: { desat: 0.55, gamma: [0.82, 0.82, 0.82], gain: [1.02, 1.0, 0.98], lift: [0.10, 0.10, 0.10] },
+    /* Bellevue cirrus (deep blue) lifted to the photo's near-white sky */
+    grade: { desat: 0.92, gamma: [0.55, 0.55, 0.55], gain: [1.56, 1.57, 1.58], lift: [0.13, 0.13, 0.135] },
   },
   kaindy: {
     waterMask: "masks/kaindy-water.png", water: 1.0,
@@ -28,7 +29,8 @@ const PIECES = {
   kolsai: {
     skyVideo: "video/kolsai-sky.mp4", skyBand: 0.46,
     skyMask: "masks/kolsai-sky.png",
-    grade: { desat: 0.10, gamma: [1.02, 1.0, 0.98], gain: [0.95, 0.97, 1.0], lift: [0, 0, 0] },
+    /* mean-matched to the photo sky: photo RGB (170,184,196) / video (197,190,185) */
+    grade: { desat: 0.15, gamma: [1, 1, 1], gain: [0.87, 0.96, 1.06], lift: [0, 0, 0] },
     waterMask: "masks/kolsai-water.png", water: 0.75,
     mist: 0.22, mistY: 0.40,
   },
@@ -40,7 +42,7 @@ const PIECES = {
   },
   bao: {
     skyVideo: "video/bao-sky.mp4", skyBand: 0.58,
-    skyMask: "masks/bao-sky.png",
+    skyMask: "masks/bao-sky.png", grain: 0.011,
     grade: { desat: 0.0, gamma: [0.90, 0.87, 0.82], gain: [0.85, 0.98, 1.15], lift: [0.0, 0.01, 0.03] },
     waterMask: "masks/bao-water.png", water: 0.35, waterYMin: 0.82,
   },
@@ -69,6 +71,8 @@ uniform float uDesat, uMist, uMistY, uSweep, uPhase, uAspect, uBirdOpacity;
 uniform vec4 uBirdRect;   /* x0, yT0, x1, yT1 */
 uniform vec2 uTexel;
 uniform vec2 uMaskCurve;  /* smoothstep lo/hi for the sky matte edge */
+uniform float uGrain;     /* film grain amount */
+uniform float uGrainSeed; /* changes ~24x/sec */
 
 #define TAU 6.283185307179586
 
@@ -161,6 +165,14 @@ void main() {
   if (uSweep > 0.001) {
     float s = sin(TAU * (uPhase - uv.x * 0.35 - yT * 0.1));
     col *= 1.0 + uSweep * 0.05 * s;
+  }
+
+  /* film grain — shared by photo and footage, ties the composite together */
+  if (uGrain > 0.0005) {
+    float gLum = dot(col, vec3(0.299, 0.587, 0.114));
+    float gn = hash(gl_FragCoord.xy * 0.754 + vec2(uGrainSeed * 13.7, uGrainSeed * 7.3)) - 0.5;
+    float weight = mix(0.55, 1.0, smoothstep(0.04, 0.35, gLum)) * (1.0 - 0.5 * smoothstep(0.85, 1.0, gLum));
+    col += gn * uGrain * weight;
   }
 
   /* vignette */
@@ -353,7 +365,9 @@ class Piece {
     /* dilated default pulls the video right up to each silhouette */
     const mc = c.maskCurve ?? [0.14, 0.55];
     gl.uniform2f(u("uMaskCurve"), mc[0], mc[1]);
+    gl.uniform1f(u("uGrain"), c.grain ?? 0.016);
     this.uPhase = u("uPhase");
+    this.uGrainSeed = u("uGrainSeed");
     this.prog = prog;
 
     this.stack.append(glCanvas, fxCanvas);
@@ -405,6 +419,8 @@ class Piece {
     if (this.skyVid && this.uploadVideoFrame(3, this.skyVid)) this.markReady();
     if (this.birdVid) this.uploadVideoFrame(4, this.birdVid);
     gl.uniform1f(this.uPhase, (now % LOOP_MS) / LOOP_MS);
+    /* grain re-rolls at ~24 fps for a filmic cadence */
+    gl.uniform1f(this.uGrainSeed, Math.floor(now / 41.7) % 977);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (DEBUG) this.drawDebug();
     else this.fx.clearRect(0, 0, this.fxCanvas.width, this.fxCanvas.height);
@@ -440,6 +456,29 @@ for (const fig of document.querySelectorAll(".piece")) {
   if (cfg) pieces.push(new Piece(fig, cfg));
 }
 
+/* fullscreen lightbox: click a frame to step into the portrait */
+const html = document.documentElement;
+let expanded = null;
+const collapse = () => {
+  if (!expanded) return;
+  expanded.fig.classList.remove("expanded");
+  html.classList.remove("lightbox");
+  expanded = null;
+};
+for (const p of pieces) {
+  p.fig.querySelector(".frame").addEventListener("click", () => {
+    if (expanded === p) return collapse();
+    collapse();
+    expanded = p;
+    p.fig.classList.add("expanded");
+    html.classList.add("lightbox");
+    if (!REDUCED) p.start();
+  });
+}
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") collapse();
+});
+
 const reveal = new IntersectionObserver(
   (entries) => entries.forEach((e) => {
     if (e.isIntersecting) e.target.classList.add("in");
@@ -469,7 +508,9 @@ if (!REDUCED) {
 
   const tick = (now) => {
     if (!document.hidden) {
-      for (const p of pieces) if (p.visible) p.draw(now);
+      /* while a portrait is expanded, everything else is hidden behind it */
+      const live = expanded ? [expanded] : pieces;
+      for (const p of live) if (p.visible || p === expanded) p.draw(now);
     }
     requestAnimationFrame(tick);
   };

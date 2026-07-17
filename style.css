@@ -110,6 +110,47 @@ h1 {
     0 40px 90px -30px rgba(0, 0, 0, 0.8),
     0 8px 28px rgba(0, 0, 0, 0.5),
     inset 0 0 0 1px #08080a;
+  cursor: zoom-in;
+}
+
+/* ---------- fullscreen lightbox ---------- */
+
+html.lightbox { overflow: hidden; }
+
+.piece.expanded { transform: none !important; transition: none; }
+
+.piece.expanded .frame {
+  cursor: zoom-out;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(16px, 4vmin, 56px);
+  background: rgba(10, 10, 13, 0.97);
+  border: 0;
+  box-shadow: none;
+  animation: lightbox-in 0.35s ease;
+}
+
+.piece.expanded .stack {
+  width: min(100%, calc((100vh - 2 * clamp(16px, 4vmin, 56px)) * var(--ar)));
+}
+
+.piece.expanded .frame::after {
+  content: "✕";
+  position: fixed;
+  top: 20px;
+  right: 28px;
+  font-family: var(--sans);
+  font-size: 19px;
+  color: var(--muted);
+}
+
+@keyframes lightbox-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .stack {

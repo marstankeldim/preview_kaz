@@ -94,6 +94,37 @@
       await post("bao_ridge.jpg", crop(get("bao"), 0.35, 0.25, 1.0, 0.60, 0.23), 0.92);
       await post("bozzhyra_rim.jpg", crop(get("bozzhyra"), 0.10, 0.05, 0.75, 0.55, 0.23), 0.92);
       await post("birds_zone.jpg", crop(get("charyn"), 0.28, 0.0, 0.66, 0.33, 0.23), 0.92);
+
+      /* grain: same phase, two seeds -> sky-region diff should be ~grain level */
+      const chp = get("charyn");
+      const grab = (now, x, y, w, h) => {
+        chp.draw(now);
+        const buf = new Uint8Array(w * h * 4);
+        chp.gl.readPixels(x, y, w, h, chp.gl.RGBA, chp.gl.UNSIGNED_BYTE, buf);
+        return buf;
+      };
+      const A = grab(5000, 400, chp.glCanvas.height - 300, 300, 200);
+      const B = grab(5100, 400, chp.glCanvas.height - 300, 300, 200);
+      let gsum = 0;
+      for (let i = 0; i < A.length; i += 4) gsum += Math.abs(A[i] - B[i]);
+      status.grainDiff = +(gsum / (A.length / 4)).toFixed(2);
+      await post("grain_zoom.jpg", crop(chp, 0.25, 0.02, 0.55, 0.22, 0.31), 0.95);
+
+      /* lightbox: click to expand, Escape to close */
+      chp.fig.querySelector(".frame").click();
+      await sleep(350);
+      const st = chp.stack.getBoundingClientRect();
+      status.lightbox = JSON.stringify({
+        expanded: chp.fig.classList.contains("expanded"),
+        scrollLocked: document.documentElement.classList.contains("lightbox"),
+        stack: [Math.round(st.width), Math.round(st.height)],
+        win: [innerWidth, innerHeight],
+        canvasPx: [chp.glCanvas.width, chp.glCanvas.height],
+      });
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await sleep(100);
+      status.lightboxClosed = !chp.fig.classList.contains("expanded") &&
+        !document.documentElement.classList.contains("lightbox");
       status.ok = true;
     } catch (e) {
       status.err = String((e && e.stack) || e);
