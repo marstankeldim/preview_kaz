@@ -230,7 +230,7 @@ class Piece {
     v.loop = true;
     v.playsInline = true;
     v.crossOrigin = "anonymous";
-    v.preload = "auto";
+    v.preload = "metadata";
     v.src = src;
     this.videos.push(v);
     return v;
@@ -456,27 +456,124 @@ for (const fig of document.querySelectorAll(".piece")) {
   if (cfg) pieces.push(new Piece(fig, cfg));
 }
 
-/* fullscreen lightbox: click a frame to step into the portrait */
+/* fullscreen lightbox */
 const html = document.documentElement;
 let expanded = null;
+let restoreFocus = null;
+const pieceName = (p) => p.fig.querySelector("h2").textContent;
+const resetExpandedPiece = (p) => {
+  p.lightboxActive = false;
+  p.fig.classList.remove("expanded");
+  const frame = p.fig.querySelector(".frame");
+  frame.removeAttribute("role");
+  frame.removeAttribute("aria-modal");
+  frame.removeAttribute("aria-label");
+  p.control.setAttribute("aria-expanded", "false");
+  p.control.setAttribute("aria-label", `Open ${pieceName(p)} fullscreen`);
+  p.control.title = "View fullscreen";
+  p.control.querySelector("span").textContent = "⛶";
+  if (!p.visible) p.pause();
+};
+const setBackgroundInert = (active, current = null) => {
+  const set = (el, value) => {
+    if (value) el.setAttribute("inert", "");
+    else el.removeAttribute("inert");
+  };
+  set(document.querySelector(".hero"), active);
+  set(document.querySelector("footer"), active);
+  pieces.forEach((p) => set(p.fig, active && p !== current));
+};
 const collapse = () => {
   if (!expanded) return;
-  expanded.fig.classList.remove("expanded");
+  resetExpandedPiece(expanded);
+  setBackgroundInert(false);
   html.classList.remove("lightbox");
   expanded = null;
+  restoreFocus?.focus();
+  restoreFocus = null;
 };
-for (const p of pieces) {
-  p.fig.querySelector(".frame").addEventListener("click", () => {
-    if (expanded === p) return collapse();
-    collapse();
-    expanded = p;
-    p.fig.classList.add("expanded");
-    html.classList.add("lightbox");
-    if (!REDUCED) p.start();
+
+const expand = (p, source) => {
+  if (expanded === p) return;
+  if (expanded) {
+    resetExpandedPiece(expanded);
+  } else {
+    restoreFocus = source;
+  }
+  expanded = p;
+  setBackgroundInert(true, p);
+  p.lightboxActive = true;
+  const frame = p.fig.querySelector(".frame");
+  frame.setAttribute("role", "dialog");
+  frame.setAttribute("aria-modal", "true");
+  frame.setAttribute("aria-label", `${pieceName(p)} living portrait`);
+  p.control.setAttribute("aria-expanded", "true");
+  p.control.setAttribute("aria-label", "Close fullscreen portrait");
+  p.control.title = "Close fullscreen";
+  p.control.querySelector("span").textContent = "×";
+  p.fig.classList.add("expanded");
+  html.classList.add("lightbox");
+  if (!REDUCED) {
+    p.start();
+    if (p.gl) p.play();
+  }
+  p.control.focus();
+};
+
+const moveExpanded = (delta) => {
+  if (!expanded) return;
+  const i = pieces.indexOf(expanded);
+  expand(pieces[(i + delta + pieces.length) % pieces.length], expanded.control);
+};
+
+for (const [i, p] of pieces.entries()) {
+  const frame = p.fig.querySelector(".frame");
+  const control = document.createElement("button");
+  control.className = "expand-control";
+  control.type = "button";
+  control.title = "View fullscreen";
+  control.setAttribute("aria-label", `Open ${pieceName(p)} fullscreen`);
+  control.setAttribute("aria-expanded", "false");
+  control.innerHTML = '<span aria-hidden="true">⛶</span>';
+  p.control = control;
+
+  const prev = document.createElement("button");
+  prev.className = "lightbox-nav prev";
+  prev.type = "button";
+  prev.title = "Previous landscape";
+  prev.setAttribute("aria-label", `Previous: ${pieceName(pieces[(i - 1 + pieces.length) % pieces.length])}`);
+  prev.textContent = "‹";
+
+  const next = document.createElement("button");
+  next.className = "lightbox-nav next";
+  next.type = "button";
+  next.title = "Next landscape";
+  next.setAttribute("aria-label", `Next: ${pieceName(pieces[(i + 1) % pieces.length])}`);
+  next.textContent = "›";
+
+  control.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (expanded === p) collapse();
+    else expand(p, control);
+  });
+  prev.addEventListener("click", (e) => {
+    e.stopPropagation();
+    moveExpanded(-1);
+  });
+  next.addEventListener("click", (e) => {
+    e.stopPropagation();
+    moveExpanded(1);
+  });
+  frame.append(control, prev, next);
+  frame.addEventListener("click", () => {
+    if (expanded === p) collapse();
+    else expand(p, control);
   });
 }
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") collapse();
+  if (e.key === "ArrowLeft") moveExpanded(-1);
+  if (e.key === "ArrowRight") moveExpanded(1);
 });
 
 const reveal = new IntersectionObserver(
