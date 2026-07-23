@@ -27,12 +27,10 @@ const PIECES = {
     grade: { desat: 0.05, gamma: [0.98, 1.0, 1.05], gain: [1.10, 1.0, 0.88], lift: [0, 0, 0] },
   },
   kolsai: {
-    skyVideo: "video/kolsai-sky.mp4", skyBand: 0.46,
-    skyMask: "masks/kolsai-sky.png",
-    /* mean-matched to the photo sky: photo RGB (170,184,196) / video (197,190,185) */
-    grade: { desat: 0.15, gamma: [1, 1, 1], gain: [0.87, 0.96, 1.06], lift: [0, 0, 0] },
-    waterMask: "masks/kolsai-water.png", water: 0.75,
-    mist: 0.22, mistY: 0.40,
+    /* Owner-supplied animation, precomposited so terrain and people remain still. */
+    skyVideo: "video/kolsai-living.mp4", skyBand: 1,
+    skyMask: "masks/kolsai-full.png",
+    grade: { desat: 0, gamma: [1, 1, 1], gain: [1, 1, 1], lift: [0, 0, 0] },
   },
   tuzbair: {
     skyVideo: "video/tuzbair-sky.mp4", skyBand: 0.60,
