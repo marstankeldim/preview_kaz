@@ -15,19 +15,18 @@
       for (let i = 0; i < 100 && !pieces.every((p) => p.gl); i++) await sleep(100);
       status.gl = pieces.map((p) => p.fig.dataset.piece + ":" + !!p.gl).join(",");
 
-      for (let i = 0; i < 50 && !pieces.every((p) => (!p.cfg.skyMask && !p.cfg.waterMask) || p.maskReady); i++) await sleep(100);
+      for (let i = 0; i < 50 && !pieces.every((p) => p.masksReady); i++) await sleep(100);
 
       const vids = [];
-      pieces.forEach((p) => { if (p.skyVid) vids.push(p.skyVid); if (p.birdVid) vids.push(p.birdVid); });
+      pieces.forEach((p) => { if (p.skyVid) vids.push(p.skyVid); });
       vids.forEach((v) => { v.play().catch(() => {}); });
       for (let i = 0; i < 200 && !vids.every((v) => v.readyState >= 2); i++) await sleep(100);
       status.vids = vids.map((v) => v.readyState).join(",");
       vids.forEach((v) => v.pause());
 
-      const seekAll = async (tSky, tBird) => {
+      const seekAll = async (time) => {
         for (const p of pieces) {
-          if (p.skyVid) p.skyVid.currentTime = Math.min(tSky, (p.skyVid.duration || 10) - 0.1);
-          if (p.birdVid) p.birdVid.currentTime = tBird;
+          if (p.skyVid) p.skyVid.currentTime = Math.min(time, (p.skyVid.duration || 10) - 0.1);
         }
         for (let i = 0; i < 80 && vids.some((v) => v.seeking); i++) await sleep(50);
         await sleep(200);
@@ -65,35 +64,16 @@
         return t;
       };
 
-      await seekAll(2.0, 6.0);
-      /* bird-path probe: uniform readback + raw video element frame */
-      const ch = pieces.find((p) => p.fig.dataset.piece === "charyn");
-      if (ch && ch.gl && ch.prog) {
-        const gg = ch.gl, pr = ch.prog;
-        const gu = (n) => { const l = gg.getUniformLocation(pr, n); return l ? gg.getUniform(pr, l) : "no-loc"; };
-        status.bird = JSON.stringify({
-          has: gu("uHasBird"), op: gu("uBirdOpacity"), rect: Array.from(gu("uBirdRect") || []),
-          curve: Array.from(gu("uMaskCurve") || []),
-          vidTime: ch.birdVid && ch.birdVid.currentTime, vidW: ch.birdVid && ch.birdVid.videoWidth,
-          vidState: ch.birdVid && ch.birdVid.readyState,
-        });
-        if (ch.birdVid) {
-          const t = document.createElement("canvas");
-          t.width = 672; t.height = 378;
-          t.getContext("2d").drawImage(ch.birdVid, 0, 0, t.width, t.height);
-          await post("birdvid_direct.jpg", t);
-        }
-      }
+      await seekAll(2.0);
       await shipAll("va", 0.23);
-      await seekAll(6.5, 9.0);
+      await post("kolsai_people_a.jpg", crop(get("kolsai"), 0.35, 0.50, 0.95, 0.85, 0.06), 0.92);
+      await seekAll(6.5);
       await shipAll("vb", 0.61);
 
-      await post("kolsai_people_a.jpg", crop(get("kolsai"), 0.35, 0.50, 0.95, 0.85, 0.06), 0.92);
       await post("kolsai_people_b.jpg", crop(get("kolsai"), 0.35, 0.50, 0.95, 0.85, 0.42), 0.92);
       await post("charyn_edge.jpg", crop(get("charyn"), 0.05, 0.16, 0.95, 0.45, 0.23), 0.92);
       await post("bao_ridge.jpg", crop(get("bao"), 0.35, 0.25, 1.0, 0.60, 0.23), 0.92);
       await post("bozzhyra_rim.jpg", crop(get("bozzhyra"), 0.10, 0.05, 0.75, 0.55, 0.23), 0.92);
-      await post("birds_zone.jpg", crop(get("charyn"), 0.28, 0.0, 0.66, 0.33, 0.23), 0.92);
 
       /* grain: same phase, two seeds -> sky-region diff should be ~grain level */
       const chp = get("charyn");

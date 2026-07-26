@@ -2,13 +2,16 @@
  *
  * Each piece composites real timelapse footage (Adobe Stock, licensed) behind
  * a Photoshop-API sky matte, over a still photograph. Water breathes via a
- * lake matte and shader displacement; birds are chroma-keyed real footage.
- * Fractions are measured from the TOP of the image. ?debug draws the guides.
+ * lake matte and shader displacement. Fractions are measured from the TOP of
+ * the image. ?debug draws the guides.
  */
 
 const LOOP_MS = 16000;
-const DEBUG = new URLSearchParams(location.search).has("debug");
-const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const QUERY = new URLSearchParams(location.search);
+const DEBUG = QUERY.has("debug");
+const VERIFY = QUERY.has("verify");
+const REDUCED = QUERY.has("reduce") || matchMedia("(prefers-reduced-motion: reduce)").matches;
+if (REDUCED) document.documentElement.classList.add("reduced-motion");
 
 const PIECES = {
   charyn: {
@@ -61,12 +64,11 @@ void main() {
 const FRAG = `
 precision highp float;
 varying vec2 vUv;
-uniform sampler2D uTex, uSkyMask, uWaterMask, uSkyVid, uBirdVid;
-uniform float uHasSkyVid, uHasWater, uHasBird;
+uniform sampler2D uTex, uSkyMask, uWaterMask, uSkyVid;
+uniform float uHasSkyVid, uHasWater;
 uniform float uSkyBand, uWaterYMin, uWaterAmp;
 uniform vec3 uGain, uLift, uGamma;
-uniform float uDesat, uMist, uMistY, uSweep, uPhase, uAspect, uBirdOpacity;
-uniform vec4 uBirdRect;   /* x0, yT0, x1, yT1 */
+uniform float uDesat, uMist, uMistY, uSweep, uPhase, uAspect;
 uniform vec2 uTexel;
 uniform vec2 uMaskCurve;  /* smoothstep lo/hi for the sky matte edge */
 uniform float uGrain;     /* film grain amount */
@@ -122,20 +124,6 @@ void main() {
     }
   }
 
-  /* ---- chroma-keyed birds, clipped to the sky matte ---- */
-  if (uHasBird > 0.5) {
-    if (uv.x > uBirdRect.x && uv.x < uBirdRect.z && yT > uBirdRect.y && yT < uBirdRect.w) {
-      vec2 buv = vec2((uv.x - uBirdRect.x) / (uBirdRect.z - uBirdRect.x),
-                      1.0 - (yT - uBirdRect.y) / (uBirdRect.w - uBirdRect.y));
-      vec3 bv = texture2D(uBirdVid, buv).rgb;
-      float greenness = bv.g - max(bv.r, bv.b);
-      float a = 1.0 - smoothstep(0.05, 0.18, greenness);
-      float skym = uHasSkyVid > 0.5 ? smoothstep(uMaskCurve.x, uMaskCurve.y, maskSoft(uSkyMask, uv, 1.4)) : 1.0;
-      float bl = dot(bv, vec3(0.299, 0.587, 0.114));
-      col = mix(col, vec3(bl * 0.85), a * skym * uBirdOpacity);
-    }
-  }
-
   /* ---- water breathing inside the lake matte ---- */
   if (uHasWater > 0.5) {
     float wm = maskSoft(uWaterMask, uv, 1.6);
@@ -184,8 +172,6 @@ void main() {
 /* a living photograph                                                 */
 /* ------------------------------------------------------------------ */
 
-const rand = (a, b) => a + Math.random() * (b - a);
-
 class Piece {
   constructor(fig, cfg) {
     this.fig = fig;
@@ -197,6 +183,10 @@ class Piece {
     this.ready = false;
     this.gl = null;
     this.videos = [];
+    this.pendingMasks = 0;
+    this.masksReady = false;
+    this.videoFrameReady = !cfg.skyVideo;
+    this.failed = false;
   }
 
   start() {
@@ -230,6 +220,8 @@ class Piece {
     v.crossOrigin = "anonymous";
     v.preload = "metadata";
     v.src = src;
+    v._textureInitialized = false;
+    v._lastUploadedTime = -1;
     this.videos.push(v);
     return v;
   }
@@ -260,14 +252,28 @@ class Piece {
     const c = this.cfg;
     const glCanvas = document.createElement("canvas");
     glCanvas.className = "gl";
-    const fxCanvas = document.createElement("canvas");
-    fxCanvas.className = "fx";
+    glCanvas.setAttribute("aria-hidden", "true");
+    const fxCanvas = DEBUG ? document.createElement("canvas") : null;
+    if (fxCanvas) {
+      fxCanvas.className = "fx";
+      fxCanvas.setAttribute("aria-hidden", "true");
+    }
     const gl = glCanvas.getContext("webgl", {
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: VERIFY,
       antialias: false,
       powerPreference: "low-power",
     });
-    if (!gl) return;
+    if (!gl) {
+      this.failed = true;
+      return;
+    }
+    glCanvas.addEventListener("webglcontextlost", () => {
+      this.failed = true;
+      this.ready = false;
+      this.stack.classList.remove("ready");
+      this.pause();
+      this.gl = null;
+    }, { once: true });
 
     const compile = (type, src) => {
       const sh = gl.createShader(type);
@@ -302,7 +308,7 @@ class Piece {
     this.gl = gl;
     this.glCanvas = glCanvas;
     this.fxCanvas = fxCanvas;
-    this.fx = fxCanvas.getContext("2d");
+    this.fx = fxCanvas?.getContext("2d") ?? null;
 
     const u = (n) => gl.getUniformLocation(prog, n);
     /* photo */
@@ -312,15 +318,29 @@ class Piece {
     gl.uniform1f(u("uAspect"), img.naturalWidth / img.naturalHeight);
 
     /* masks (async) */
+    this.pendingMasks = [c.skyMask, c.waterMask].filter(Boolean).length;
+    this.masksReady = this.pendingMasks === 0;
     const loadMask = (unit, src, uniform) => {
       gl.uniform1i(u(uniform), unit);
       this.loadTexture(unit, null);
       const m = new Image();
+      let settled = false;
+      const complete = () => {
+        if (settled) return;
+        settled = true;
+        this.pendingMasks -= 1;
+        this.masksReady = this.pendingMasks === 0;
+        this.markReady();
+      };
       m.onload = () => {
         gl.activeTexture(gl.TEXTURE0 + unit);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, m);
-        this.maskReady = true;
+        complete();
+      };
+      m.onerror = () => {
+        console.warn(`living-land mask failed: ${src}`);
+        complete();
       };
       m.src = src;
     };
@@ -329,24 +349,16 @@ class Piece {
 
     /* videos */
     gl.uniform1i(u("uSkyVid"), 3);
-    gl.uniform1i(u("uBirdVid"), 4);
     if (c.skyVideo) {
       this.skyVid = this.makeVideo(c.skyVideo);
       this.skyTex = this.loadTexture(3, null);
     } else {
       this.loadTexture(3, null);
     }
-    if (c.birdVideo) {
-      this.birdVid = this.makeVideo(c.birdVideo);
-      this.birdTex = this.loadTexture(4, null);
-    } else {
-      this.loadTexture(4, null);
-    }
 
     const g = c.grade || {};
     gl.uniform1f(u("uHasSkyVid"), c.skyVideo ? 1 : 0);
     gl.uniform1f(u("uHasWater"), c.waterMask ? 1 : 0);
-    gl.uniform1f(u("uHasBird"), c.birdVideo ? 1 : 0);
     gl.uniform1f(u("uSkyBand"), c.skyBand ?? 0.5);
     gl.uniform1f(u("uWaterYMin"), c.waterYMin ?? 0);
     gl.uniform1f(u("uWaterAmp"), c.water ?? 0);
@@ -357,9 +369,6 @@ class Piece {
     gl.uniform1f(u("uMist"), c.mist ?? 0);
     gl.uniform1f(u("uMistY"), c.mistY ?? 0.3);
     gl.uniform1f(u("uSweep"), c.sweep ?? 0);
-    gl.uniform1f(u("uBirdOpacity"), c.birdOpacity ?? 0);
-    const r = c.birdRect ?? [0, 0, 0, 0];
-    gl.uniform4f(u("uBirdRect"), r[0], r[1], r[2], r[3]);
     /* dilated default pulls the video right up to each silhouette */
     const mc = c.maskCurve ?? [0.14, 0.55];
     gl.uniform2f(u("uMaskCurve"), mc[0], mc[1]);
@@ -368,17 +377,19 @@ class Piece {
     this.uGrainSeed = u("uGrainSeed");
     this.prog = prog;
 
-    this.stack.append(glCanvas, fxCanvas);
+    this.stack.append(glCanvas);
+    if (fxCanvas) this.stack.append(fxCanvas);
     this.resize();
-    new ResizeObserver(() => this.resize()).observe(this.stack);
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(this.stack);
 
     if (this.visible) this.play();
     this.draw(performance.now());
-    if (!c.skyVideo) this.markReady();
+    this.markReady();
   }
 
   markReady() {
-    if (this.ready) return;
+    if (this.ready || this.failed || !this.masksReady || !this.videoFrameReady) return;
     this.ready = true;
     this.stack.classList.add("ready");
   }
@@ -393,18 +404,26 @@ class Piece {
   uploadVideoFrame(unit, video) {
     if (!video || video.readyState < 2) return false;
     const gl = this.gl;
+    if (video._textureInitialized && video._lastUploadedTime === video.currentTime) return true;
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+    if (video._textureInitialized) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGB, gl.UNSIGNED_BYTE, video);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+      video._textureInitialized = true;
+    }
+    video._lastUploadedTime = video.currentTime;
     return true;
   }
 
   resize() {
+    if (!this.gl || this.failed) return;
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const w = Math.round(this.stack.clientWidth * dpr);
     const h = Math.round(this.stack.clientHeight * dpr);
     if (!w || !h) return;
-    for (const cv of [this.glCanvas, this.fxCanvas]) {
+    for (const cv of [this.glCanvas, this.fxCanvas].filter(Boolean)) {
       if (cv.width !== w) cv.width = w;
       if (cv.height !== h) cv.height = h;
     }
@@ -413,15 +432,16 @@ class Piece {
 
   draw(now) {
     const gl = this.gl;
-    if (!gl) return;
-    if (this.skyVid && this.uploadVideoFrame(3, this.skyVid)) this.markReady();
-    if (this.birdVid) this.uploadVideoFrame(4, this.birdVid);
+    if (!gl || this.failed) return;
+    if (this.skyVid && this.uploadVideoFrame(3, this.skyVid)) {
+      this.videoFrameReady = true;
+      this.markReady();
+    }
     gl.uniform1f(this.uPhase, (now % LOOP_MS) / LOOP_MS);
     /* grain re-rolls at ~24 fps for a filmic cadence */
     gl.uniform1f(this.uGrainSeed, Math.floor(now / 41.7) % 977);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (DEBUG) this.drawDebug();
-    else this.fx.clearRect(0, 0, this.fxCanvas.width, this.fxCanvas.height);
   }
 
   drawDebug() {
@@ -436,11 +456,6 @@ class Piece {
     };
     if (c.skyBand) line(c.skyBand, "rgba(255,120,80,0.9)", "skyBand");
     if (c.waterYMin) line(c.waterYMin, "rgba(80,220,255,0.9)", "waterYMin");
-    if (c.birdRect) {
-      const [x0, y0, x1, y1] = c.birdRect;
-      ctx.strokeStyle = "rgba(255,230,90,0.9)";
-      ctx.strokeRect(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h);
-    }
   }
 }
 
@@ -601,8 +616,22 @@ if (!REDUCED) {
   );
   pieces.forEach((p) => watch.observe(p.fig));
 
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      pieces.forEach((p) => p.pause());
+      return;
+    }
+    const live = expanded ? [expanded] : pieces;
+    live.forEach((p) => {
+      if (p.visible || p === expanded) p.play();
+    });
+  });
+
+  const frameMs = 1000 / 30;
+  let lastFrame = -frameMs;
   const tick = (now) => {
-    if (!document.hidden) {
+    if (!document.hidden && now - lastFrame >= frameMs) {
+      lastFrame = now;
       /* while a portrait is expanded, everything else is hidden behind it */
       const live = expanded ? [expanded] : pieces;
       for (const p of live) if (p.visible || p === expanded) p.draw(now);

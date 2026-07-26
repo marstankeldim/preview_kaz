@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0d0d10;
   --ink: #eae3d3;
   --muted: #9a917e;
@@ -22,6 +23,27 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+}
+
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 100;
+  padding: 9px 13px;
+  transform: translateY(calc(-100% - 20px));
+  background: var(--ink);
+  color: var(--bg);
+  font-family: var(--sans);
+  font-size: 13px;
+  text-decoration: none;
+  transition: transform 0.18s ease;
+}
+
+.skip-link:focus {
+  transform: none;
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
 }
 
 /* ---------- header ---------- */
@@ -118,7 +140,11 @@ h1 {
 
 html.lightbox { overflow: hidden; }
 
-.piece.expanded { transform: none !important; transition: none; }
+.piece.expanded {
+  opacity: 1 !important;
+  transform: none !important;
+  transition: none;
+}
 
 .piece.expanded .frame {
   cursor: zoom-out;
@@ -304,7 +330,19 @@ footer .rule { justify-content: center; margin: 0 auto 40px; width: fit-content;
   text-decoration: none;
   border-bottom: 1px solid #3a352b;
 }
-.credits a:hover { color: var(--brass); border-bottom-color: var(--brass); }
+.credits a:hover,
+.credits a:focus-visible {
+  color: var(--brass);
+  border-bottom-color: var(--brass);
+}
+.credits a:focus-visible {
+  outline: 1px solid var(--brass);
+  outline-offset: 4px;
+}
+
+@media (hover: none) {
+  .expand-control { opacity: 0.82; }
+}
 
 @media (max-width: 640px) {
   .hero {
@@ -340,6 +378,14 @@ footer .rule { justify-content: center; margin: 0 auto 40px; width: fit-content;
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  .skip-link,
+  .stack canvas.gl { transition: none; }
   .piece { opacity: 1; transform: none; transition: none; }
   .piece.expanded .frame { animation: none; }
 }
+
+html.reduced-motion { scroll-behavior: auto; }
+html.reduced-motion .skip-link,
+html.reduced-motion .stack canvas.gl { transition: none; }
+html.reduced-motion .piece { opacity: 1; transform: none; transition: none; }
+html.reduced-motion .piece.expanded .frame { animation: none; }
