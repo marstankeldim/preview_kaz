@@ -24,6 +24,12 @@ consistently.
   when it is out of view.
 - `img/`, `video/`, and `masks/` hold the photographs, motion footage, and
   scene-specific mattes.
+- The `*-v2.mp4` files are color-matched, 24 fps seamless loop masters. Their
+  `*-1280.mp4` counterparts are selected below the 700px mobile breakpoint.
+- Kolsai uses the supplied animation only inside a refined sky matte. The
+  terrain, lake, stairs, and people come from a static 1920px photograph.
+- Water motion is perspective-scaled and constrained to refined lake mattes so
+  reflections move without bending shorelines, trees, or foreground objects.
 - Add `?debug` to show mask alignment guides.
 - Add `?reduce` to preview the still-photo reduced-motion experience.
 - `?verify` loads the local capture harness in `verify.js`; it expects a capture

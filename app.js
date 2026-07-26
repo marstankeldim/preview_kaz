@@ -15,37 +15,44 @@ if (REDUCED) document.documentElement.classList.add("reduced-motion");
 
 const PIECES = {
   charyn: {
-    skyVideo: "video/charyn-sky.mp4", skyBand: 0.40,
-    skyMask: "masks/charyn-sky.png",
-    /* Bellevue cirrus (deep blue) lifted to the photo's near-white sky */
-    grade: { desat: 0.92, gamma: [0.55, 0.55, 0.55], gain: [1.56, 1.57, 1.58], lift: [0.13, 0.13, 0.135] },
+    skyVideo: "video/charyn-sky-v2.mp4", skyBand: 0.40,
+    skyVideoMobile: "video/charyn-sky-v2-1280.mp4",
+    skyMask: "masks/charyn-sky-refined.png", maskCurve: [0.08, 0.55],
+    /* Lift the source cirrus toward the photograph without clipping it to white. */
+    grade: { desat: 0.94, gamma: [0.61, 0.61, 0.61], gain: [1.44, 1.45, 1.46], lift: [0.10, 0.10, 0.105] },
+    grain: 0.012,
   },
   kaindy: {
-    waterMask: "masks/kaindy-water.png", water: 1.0,
-    mist: 0.30, mistY: 0.30,
+    waterMask: "masks/kaindy-water-refined.png", water: 0.82, waterGlint: 0.42, waterYMin: 0.28,
+    mist: 0.24, mistY: 0.30,
   },
   bozzhyra: {
-    skyVideo: "video/bozzhyra-sky.mp4", skyBand: 0.68,
-    skyMask: "masks/bozzhyra-sky.png",
-    grade: { desat: 0.05, gamma: [0.98, 1.0, 1.05], gain: [1.10, 1.0, 0.88], lift: [0, 0, 0] },
+    skyVideo: "video/bozzhyra-sky-v2.mp4", skyBand: 0.68,
+    skyVideoMobile: "video/bozzhyra-sky-v2-1280.mp4",
+    skyMask: "masks/bozzhyra-sky-refined.png", maskCurve: [0.32, 0.76],
+    grade: { desat: 0.16, gamma: [1.0, 1.01, 1.04], gain: [1.04, 1.0, 0.92], lift: [0, 0, 0] },
   },
   kolsai: {
-    /* Owner-supplied animation, precomposited so terrain and people remain still. */
-    skyVideo: "video/kolsai-living.mp4", skyBand: 1,
-    skyMask: "masks/kolsai-full.png",
-    grade: { desat: 0, gamma: [1, 1, 1], gain: [1, 1, 1], lift: [0, 0, 0] },
+    /* The owner-supplied animation now contributes only sky; terrain stays photographic. */
+    skyVideo: "video/kolsai-sky-v2.mp4", skyBand: 1,
+    skyVideoMobile: "video/kolsai-sky-v2-1280.mp4",
+    skyMask: "masks/kolsai-sky-refined.png", maskCurve: [0.34, 0.78],
+    grade: { desat: 0.04, gamma: [1, 1, 1], gain: [1, 1.01, 1.01], lift: [0, 0, 0] },
+    grain: 0.006,
   },
   tuzbair: {
-    skyVideo: "video/tuzbair-sky.mp4", skyBand: 0.60,
-    skyMask: "masks/tuzbair-sky.png",
-    grade: { desat: 0.20, gamma: [1.05, 1.0, 0.95], gain: [0.88, 0.93, 1.04], lift: [0, 0, 0] },
+    skyVideo: "video/tuzbair-sky-v2.mp4", skyBand: 0.60,
+    skyVideoMobile: "video/tuzbair-sky-v2-1280.mp4",
+    skyMask: "masks/tuzbair-sky-refined.png", maskCurve: [0.38, 0.80],
+    grade: { desat: 0.32, gamma: [1.02, 1.0, 0.98], gain: [1.02, 1.0, 0.96], lift: [0, 0, 0] },
     sweep: 0.5,
   },
   bao: {
-    skyVideo: "video/bao-sky.mp4", skyBand: 0.58,
-    skyMask: "masks/bao-sky.png", grain: 0.011,
-    grade: { desat: 0.0, gamma: [0.90, 0.87, 0.82], gain: [0.85, 0.98, 1.15], lift: [0.0, 0.01, 0.03] },
-    waterMask: "masks/bao-water.png", water: 0.35, waterYMin: 0.82,
+    skyVideo: "video/bao-sky-v2.mp4", skyBand: 0.58,
+    skyVideoMobile: "video/bao-sky-v2-1280.mp4",
+    skyMask: "masks/bao-sky-refined.png", maskCurve: [0.10, 0.58], grain: 0.009,
+    grade: { desat: 0.14, gamma: [0.92, 0.90, 0.88], gain: [0.88, 0.96, 1.08], lift: [0.0, 0.008, 0.018] },
+    waterMask: "masks/bao-water-refined.png", water: 0.30, waterGlint: 0.08, waterYMin: 0.82,
   },
 };
 
@@ -66,7 +73,7 @@ precision highp float;
 varying vec2 vUv;
 uniform sampler2D uTex, uSkyMask, uWaterMask, uSkyVid;
 uniform float uHasSkyVid, uHasWater;
-uniform float uSkyBand, uWaterYMin, uWaterAmp;
+uniform float uSkyBand, uWaterYMin, uWaterAmp, uWaterGlint;
 uniform vec3 uGain, uLift, uGamma;
 uniform float uDesat, uMist, uMistY, uSweep, uPhase, uAspect;
 uniform vec2 uTexel;
@@ -129,14 +136,19 @@ void main() {
     float wm = maskSoft(uWaterMask, uv, 1.6);
     wm *= smoothstep(uWaterYMin, uWaterYMin + 0.03, yT);
     if (wm > 0.003) {
-      float p1 = sin(uv.x * 90.0 + uPhase * TAU * 3.0 + yT * 70.0);
-      float p2 = sin(uv.x * 52.0 - uPhase * TAU * 2.0 + yT * 118.0);
-      float p3 = noise(vec2(uv.x * 22.0 * uAspect, yT * 30.0) + loopVec * 0.8) - 0.5;
-      vec2 woff = vec2((p2 - p1) * 0.45, (p1 + p2) * 0.85 + p3) * 0.0022 * uWaterAmp * wm;
+      float depth = smoothstep(uWaterYMin, min(1.0, uWaterYMin + 0.62), yT);
+      float amp = mix(0.18, 1.0, depth) * uWaterAmp * wm;
+      float p1 = sin(uv.x * 112.0 + yT * 38.0 + uPhase * TAU * 2.0);
+      float p2 = sin((uv.x * 0.75 + yT * 0.25) * 74.0 - uPhase * TAU * 3.0);
+      float p3 = noise(vec2(uv.x * 26.0 * uAspect, yT * 34.0) + loopVec * 0.65) - 0.5;
+      vec2 woff = vec2((p1 * 0.65 + p2 * 0.35 + p3 * 0.4) * 0.0020,
+                       (p2 - p1) * 0.00045) * amp;
       float wm2 = maskSoft(uWaterMask, uv + woff, 1.6);
       col = mix(col, texture2D(uTex, uv + woff).rgb, wm * wm2);
-      float spark = noise(uv * vec2(160.0 * uAspect, 220.0) + loopVec * 2.0) - 0.5;
-      col += spark * 0.05 * uWaterAmp * wm * smoothstep(0.25, 0.75, lum);
+      float sparkle = noise(uv * vec2(220.0 * uAspect, 300.0) + loopVec * 1.8);
+      float glint = smoothstep(0.82, 0.97, sparkle);
+      col += vec3(1.0, 0.96, 0.82) * glint * 0.055 * uWaterGlint
+           * wm * depth * smoothstep(0.25, 0.78, lum);
     }
   }
 
@@ -185,7 +197,7 @@ class Piece {
     this.videos = [];
     this.pendingMasks = 0;
     this.masksReady = false;
-    this.videoFrameReady = !cfg.skyVideo;
+    this.videoFrameReady = !(cfg.skyVideo || cfg.skyVideoMobile);
     this.failed = false;
   }
 
@@ -348,20 +360,24 @@ class Piece {
     if (c.waterMask) loadMask(2, c.waterMask, "uWaterMask");
 
     /* videos */
+    this.skySource = matchMedia("(max-width: 700px)").matches && c.skyVideoMobile
+      ? c.skyVideoMobile
+      : c.skyVideo;
     gl.uniform1i(u("uSkyVid"), 3);
-    if (c.skyVideo) {
-      this.skyVid = this.makeVideo(c.skyVideo);
+    if (this.skySource) {
+      this.skyVid = this.makeVideo(this.skySource);
       this.skyTex = this.loadTexture(3, null);
     } else {
       this.loadTexture(3, null);
     }
 
     const g = c.grade || {};
-    gl.uniform1f(u("uHasSkyVid"), c.skyVideo ? 1 : 0);
+    gl.uniform1f(u("uHasSkyVid"), this.skySource ? 1 : 0);
     gl.uniform1f(u("uHasWater"), c.waterMask ? 1 : 0);
     gl.uniform1f(u("uSkyBand"), c.skyBand ?? 0.5);
     gl.uniform1f(u("uWaterYMin"), c.waterYMin ?? 0);
     gl.uniform1f(u("uWaterAmp"), c.water ?? 0);
+    gl.uniform1f(u("uWaterGlint"), c.waterGlint ?? 0);
     gl.uniform3fv(u("uGain"), g.gain ?? [1, 1, 1]);
     gl.uniform3fv(u("uLift"), g.lift ?? [0, 0, 0]);
     gl.uniform3fv(u("uGamma"), g.gamma ?? [1, 1, 1]);
